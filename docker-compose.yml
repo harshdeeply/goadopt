@@ -1,0 +1,15 @@
+version: "1"
+services:
+  postgres:
+    image: postgres
+    ports:
+      - "5432:5432"
+
+  goapp:
+    build: .
+    environment:
+      - SECRET_KEY=qwertqwertqwertqwertqwertqwertqwert1234
+    ports:
+      - "8080:8080"
+    depends_on:
+      - postgres

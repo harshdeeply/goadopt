@@ -25,7 +25,7 @@ type PostgresDB struct {
 
 // DBConnect initializes a connection to the postgres database
 func DBConnect() (*PostgresDB, error) {
-	connStr := "user=postgres dbname=postgres password=goadopt sslmode=disable"
+	connStr := "postgres://postgres:password@postgres:5432/postgres?sslmode=disable"
 	db, err := sql.Open("postgres", connStr)
 	if err != nil {
 		return nil, err
@@ -42,30 +42,46 @@ func DBConnect() (*PostgresDB, error) {
 
 // Init creates adoption listing table
 func (cn *PostgresDB) Init() error {
-	q := `
-		CREATE TABLE IF NOT EXISTS listing (
-			id SERIAL PRIMARY KEY,
-			listed_by VARCHAR(100) NOT NULL,
-			name VARCHAR(100) NOT NULL,
-			pet_type VARCHAR(50) NOT NULL,
-			breed VARCHAR(50),
-			sex VARCHAR(10) CHECK (sex IN ('m', 'f')) NOT NULL,
-			dob DATE NOT NULL,
-			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-		);
+	// Drop the database outside of a transaction
+	_, err := cn.db.Exec("DROP DATABASE IF EXISTS goadapt;")
+	if err != nil {
+		return err
+	}
 
-		CREATE TABLE IF NOT EXISTS "user" (
-			id SERIAL PRIMARY KEY,
-			username VARCHAR(100) UNIQUE NOT NULL,
-			encrypted_password TEXT NOT NULL,
-			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-			CONSTRAINT no_spaces_username CHECK (username !~ '\s')
-		);
-		`
+	// Create the database
+	_, err = cn.db.Exec("CREATE DATABASE goadapt;")
+	if err != nil {
+		return err
+	}
 
-	_, err := cn.db.Exec(q)
-	return err
+	// Create tables
+	_, err = cn.db.Exec(`
+		DROP TABLE IF EXISTS listing;
+        CREATE TABLE listing (
+            id SERIAL PRIMARY KEY,
+            listed_by VARCHAR(100) NOT NULL,
+            name VARCHAR(100) NOT NULL,
+            pet_type VARCHAR(50) NOT NULL,
+            breed VARCHAR(50),
+            sex VARCHAR(10) CHECK (sex IN ('m', 'f')) NOT NULL,
+            dob DATE NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+
+		DROP TABLE IF EXISTS "user";
+        CREATE TABLE "user" (
+            id SERIAL PRIMARY KEY,
+            username VARCHAR(100) UNIQUE NOT NULL,
+            encrypted_password TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            CONSTRAINT no_spaces_username CHECK (username !~ '\s')
+        );
+    `)
+	if err != nil {
+		return err
+	}
+	return nil
 }
 
 func (cn *PostgresDB) CreateUser(user *User) error {
