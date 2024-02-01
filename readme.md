@@ -9,6 +9,11 @@ This project is an API written in Golang for a pet adoption app. It utilizes Pos
 - Returns all listings.
 - No authentication token needed in the header.
 
+### GET /{username}/listings
+
+- Retrieves all the listings by the specified username.
+- Does not require a valid JWT token in the header.
+
 ### POST /signup
 
 - Registers a new user and returns a JWT token.
@@ -38,6 +43,12 @@ This project is an API written in Golang for a pet adoption app. It utilizes Pos
 ### GET /listing/{id}
 
 - Retrieves the listing with the specified ID.
+- Requires a valid JWT token in the header.
+- Only allows access to listings owned by the authenticated user, otherwise returns an error.
+
+### DELETE /listing/{id}
+
+- Deletes the listing with the specified ID.
 - Requires a valid JWT token in the header.
 - Only allows access to listings owned by the authenticated user, otherwise returns an error.
 
