@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -32,11 +33,68 @@ func NewAPIServer(listAddr string, store Storage) *APIServer {
 
 func (s *APIServer) Run() {
 	router := mux.NewRouter()
-	router.HandleFunc("/listings", makeHttpHandleFunc(s.handleListings))
-	router.HandleFunc("/listings/{id}", withAuth(makeHttpHandleFunc(s.handleListingsByID), s.store))
+	router.HandleFunc("/signup", makeHttpHandleFunc(s.handleSignup))
+	router.HandleFunc("/{username}/listings", makeHttpHandleFunc(s.handleListingsByUsername))
+	router.HandleFunc("/listings", makeHttpHandleFunc(s.handleListings)).Methods("GET")
+	router.HandleFunc("/listings", withAuth(makeHttpHandleFunc(s.handleListings), s.store)).Methods("POST")
+	router.HandleFunc("/listings/{id}", withAuth(makeHttpHandleFunc(s.handleListingsByID), s.store)).Methods("GET", "DELETE")
 
 	log.Println("API is running on port", s.listenAddr)
 	http.ListenAndServe(s.listenAddr, router)
+}
+
+// handles /signup
+func (s *APIServer) handleSignup(w http.ResponseWriter, r *http.Request) error {
+	// Only POST method is allowed
+	if r.Method != "POST" {
+		return fmt.Errorf("method not allowed: %s", r.Method)
+	}
+
+	crtUserReq := new(CreateUserRequest)
+	if err := json.NewDecoder(r.Body).Decode(&crtUserReq); err != nil {
+		return err
+	}
+
+	user, err := NewUser(crtUserReq.Username, crtUserReq.Password)
+	if err != nil {
+		return err
+	}
+	// Check if username taken
+	userExists, err := s.store.DoesUserExist(user.Username)
+	if err != nil {
+		return err
+	}
+
+	if userExists {
+		return fmt.Errorf("username %s is taken", user.Username)
+	}
+
+	// Write user to database
+	if err := s.store.CreateUser(user); err != nil {
+		return err
+	}
+
+	// Sign JWT
+	tokenString, err := createJWTToken(user)
+	if err != nil {
+		return err
+	}
+
+	resp := CreateUserResponse{
+		Username: user.Username,
+		Token:    tokenString,
+	}
+	return WriteJSON(w, http.StatusCreated, resp)
+}
+
+// Get all listings by username
+func (s *APIServer) handleListingsByUsername(w http.ResponseWriter, r *http.Request) error {
+	username := mux.Vars(r)["username"]
+	listings, err := s.store.GetListingsByUsername(username)
+	if err != nil {
+		return err
+	}
+	return WriteJSON(w, http.StatusOK, listings)
 }
 
 // handles /listings endpoint methods
@@ -51,33 +109,50 @@ func (s *APIServer) handleListings(w http.ResponseWriter, r *http.Request) error
 
 // handles /listings/{id} endpoint methods
 func (s *APIServer) handleListingsByID(w http.ResponseWriter, r *http.Request) error {
-	if r.Method == "GET" {
-		return s.handleGetListingByID(w, r)
-	} else if r.Method == "DELETE" {
-		return s.handleDeleteListing(w, r)
-	} else if r.Method == "PUT" {
-		return s.handleUpdateListing(w, r)
+	username := r.Context().Value("username").(string)
+	id, err := parseIdFromReq(r)
+	if err != nil {
+		return err
+	}
+	ownsListing, err := s.store.CheckOwnership(username, id)
+	if err != nil {
+		return err
+	}
+	if ownsListing {
+		if r.Method == "GET" {
+			return s.handleGetListingByID(w, r)
+		} else if r.Method == "DELETE" {
+			return s.handleDeleteListing(w, r)
+		}
+	} else {
+		return fmt.Errorf("invalid request")
 	}
 	return fmt.Errorf("method not allowed %s", r.Method)
 }
 
 // Create new listing
 func (s *APIServer) handleCreateListing(w http.ResponseWriter, r *http.Request) error {
+	username := r.Context().Value("username").(string)
+
 	crtLstReq := new(CreateListingRequest)
 	if err := json.NewDecoder(r.Body).Decode(&crtLstReq); err != nil {
 		return err
 	}
-	listing := NewListing(crtLstReq.UserId, crtLstReq.Name, crtLstReq.PetType, crtLstReq.Breed, Sex(crtLstReq.Sex), crtLstReq.Dob)
-	if err := s.store.CreateListing(listing); err != nil {
-		return err
-	}
-
-	tokenString, err := createJWTToken(listing)
+	listing := NewListing(username, crtLstReq.Name, crtLstReq.PetType, crtLstReq.Breed, Sex(crtLstReq.Sex), crtLstReq.Dob)
+	newListing, err := s.store.CreateListing(listing)
 	if err != nil {
 		return err
 	}
-	fmt.Println("JWT: ", tokenString)
-	return WriteJSON(w, http.StatusCreated, listing)
+	resp := CreateListingResponse{
+		Id:        newListing.ID,
+		Name:      newListing.Name,
+		Breed:     newListing.Breed,
+		PetType:   newListing.PetType,
+		Dob:       newListing.Dob,
+		Sex:       newListing.Sex,
+		CreatedAt: newListing.CreatedAt,
+	}
+	return WriteJSON(w, http.StatusCreated, resp)
 }
 
 // Get all listings
@@ -87,11 +162,6 @@ func (s *APIServer) handleGetListings(w http.ResponseWriter, r *http.Request) er
 		return err
 	}
 	return WriteJSON(w, http.StatusOK, listings)
-}
-
-// Update listing by ID
-func (s *APIServer) handleUpdateListing(w http.ResponseWriter, r *http.Request) error {
-	return nil
 }
 
 // Get listing by ID
@@ -143,22 +213,9 @@ func withAuth(handlerFunc http.HandlerFunc, s Storage) http.HandlerFunc {
 			return
 		}
 
-		listingId, err := parseIdFromReq(r)
-		if err != nil {
-			InvalidToken(w)
-			return
-		}
-		listing, err := s.GetListingByID(listingId)
-		if err != nil {
-			InvalidToken(w)
-			return
-		}
-
 		claims := token.Claims.(jwt.MapClaims)
-		if listing.ID != int(claims["userId"].(float64)) {
-			InvalidToken(w)
-			return
-		}
+		ctx := context.WithValue(r.Context(), "username", claims["username"])
+		r = r.WithContext(ctx)
 
 		handlerFunc(w, r)
 	}
@@ -174,10 +231,10 @@ func validateJWTToken(tokenString string) (*jwt.Token, error) {
 	})
 }
 
-func createJWTToken(listing *PetListing) (string, error) {
+func createJWTToken(user *User) (string, error) {
 	claims := &jwt.MapClaims{
 		"expiresAt": 15000,
-		"userId":    listing.UserId,
+		"username":  user.Username,
 	}
 	secret := os.Getenv("JWT_SECRET")
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
